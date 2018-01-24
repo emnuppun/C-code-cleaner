@@ -6,36 +6,54 @@
 #include <unistd.h>
 #include <sys/types.h>
 #include <fcntl.h>
+#include <sys/stat.h>
 
 #include "loglib.h"
+#include "memory.h"
  
  /*this program removes comments and empty lines from C code*/
 
 #define BUFLEN 1024
-static int fd_log;
+static int fd_log; //for the log file
+static M_tracker *mem; //for memory freeing
+static char log_buf[1024]; //for writing log entries
+
+
+void prepare_log()
+{   
+    char *write_log_buf;
+    write_log_buf = calloc(strlen(log_buf) + 1, 1);
+    /*sets the memory address to the memory tracker*/
+    mem = set_memory(mem, write_log_buf);
+    strcpy(write_log_buf, log_buf);
+    write_log(write_log_buf, fd_log);
+    /*frees the memory address from the memory tracker*/
+    free_memory(mem, write_log_buf);
+    log_buf[0] = 0;
+}
 
 void signal_handler(int signal) {
     switch (signal) {
         case SIGTERM:
         {
-            printf("SIGTERM in %d\n",getpid());
-            break;
+            sprintf(log_buf, "Caught SIGTERM in %d. Freeing memory and exiting\n",getpid());
+            prepare_log();
+            release_memory(mem);
+            close(fd_log);
+            exit(0);
         }
         case SIGINT:
         {
-            printf("SIGINT in %d\n",getpid());
+            /*Waiting for SIGTERM or some other action*/
+            sleep(1);
             break;
         }
-        
-        
     }
 }
 
 void set_lock(int fd, int type)
 {
     struct flock lock;
-    char log_buf[1024] = { 0 };
-    char *write_log_buf;
 
     lock.l_whence = SEEK_SET;
     lock.l_start = 0;
@@ -45,59 +63,42 @@ void set_lock(int fd, int type)
         lock.l_type = type;
         /* if we get the lock, return immediately */
         if (!fcntl(fd, F_SETLK, &lock)) {
-            sprintf(log_buf, "Setting lock to fd %d in PID %d\n", fd, getpid());
-            write_log_buf = calloc(strlen(log_buf) + 1, 1);
-            strcpy(write_log_buf, log_buf);
-            write_log(write_log_buf, fd_log);
+            sprintf(log_buf, "\tSetting lock to fd %d in PID %d\n", fd, getpid());
+            prepare_log();
             return;
         }
-
-        /* find out who holds the conflicting lock
-        fcntl(fd, F_GETLK, &lock);
-        if (lock.l_type != F_UNLCK) {
-            /*sprintf(log_buf, "Can't set file lock, conflict with process %d", lock.l_pid);
-            write_log_buf = calloc(strlen(log_buf) + 1, 1);
-            strcpy(write_log_buf, log_buf);
-            write_log(write_log_buf, fd_log);
-            printf("%s\n", "apua");
-        }*/
     }
 }
 
-
 int remove_comments(const char *filename, const char *output)
 {
-    char log_buf[1024] = { 0 };
-    char *write_log_buf;
-
-    //int r_file = open(filename, O_RDONLY | O_CREAT, S_IRWXU);
     FILE *r_file = fopen(filename, "r");
+
     if (!r_file) {
     	sprintf(log_buf, "Cannot open file %s\n", filename);
-        printf("%s\n", log_buf);
-        write_log_buf = calloc(strlen(log_buf) + 1, 1);
-        strcpy(write_log_buf, log_buf);
-        write_log(write_log_buf, fd_log);
+        prepare_log();
         return -1;
     }
 
+    mem = set_fp(mem, r_file);
+
+    /*Setting reading lock*/
     set_lock(fileno(r_file), F_RDLCK);
     
-    // tmp = temporary file descriptor to store te uncommented version with empty lines
-    //int tmp = open(output, O_WRONLY | O_CREAT, S_IRWXU);
+    /* tmp = temporary file descriptor to store te uncommented version with empty lines*/
     FILE *tmp = fopen(output, "w");
     if(!tmp) {
         sprintf(log_buf, "Cannot open file %s\n", output);
-        printf("%s\n", log_buf);
-        write_log_buf = calloc(strlen(log_buf) + 1, 1);
-        strcpy(write_log_buf, log_buf);
-        write_log(write_log_buf, fd_log);
+        prepare_log();
         return -1;
     }
+    mem = set_fp(mem, tmp);
 
+    /*Setting writing lock*/
     set_lock(fileno(tmp), F_WRLCK);
 
-    //c = current char
+    /*Removing comments.
+    c = current char*/
     char c = fgetc(r_file);
     char next;
     while(c != EOF) {
@@ -120,9 +121,9 @@ int remove_comments(const char *filename, const char *output)
             c = next;
         }
         
-    }
-    fclose(r_file);
-    fclose(tmp);
+    } //while
+    close_fp(mem, r_file);
+    close_fp(mem, tmp);
 
     return 0;
 
@@ -131,39 +132,33 @@ int remove_comments(const char *filename, const char *output)
 int remove_empty_lines(const char *orig, const char *filename)
 {
     char* c_name = calloc(strlen(orig) + strlen(".clean") + 1, 1);
+    mem = set_memory(mem, c_name);
     strcpy(c_name, orig);
     strcat(c_name, ".clean");
-    char log_buf[1024] = { 0 };
-    char *write_log_buf;
 
-    //final clean file
-
-    //int c_file = open(c_name, O_WRONLY | O_CREAT, S_IRWXU);
+    /*final clean file*/
 
     FILE *c_file = fopen(c_name, "w");
 
     if(!c_file) {
         sprintf(log_buf, "Cannot open file %s\n", c_name);
         printf("%s\n", log_buf);
-        write_log_buf = calloc(strlen(log_buf) + 1, 1);
-        strcpy(write_log_buf, log_buf);
-        write_log(write_log_buf, fd_log);
+        prepare_log();
         return -1;
     }
+    mem = set_fp(mem, c_file);
 
     set_lock(fileno(c_file), F_WRLCK);
 
-    //int tmp = open(filename, O_RDONLY | O_CREAT, S_IRWXU);
     FILE *tmp = fopen(filename, "r");
 
     if(!tmp) {
         sprintf(log_buf, "Cannot open file %s\n", filename);
         printf("%s\n", log_buf);
-        write_log_buf = calloc(strlen(log_buf) + 1, 1);
-        strcpy(write_log_buf, log_buf);
-        write_log(write_log_buf, fd_log);
+        prepare_log();
         return -1;
     }
+    mem = set_fp(mem, tmp);
 
     set_lock(fileno(tmp), F_RDLCK);
 
@@ -187,9 +182,9 @@ int remove_empty_lines(const char *orig, const char *filename)
         flag = 0, i = 0;
     }
 
-    free(c_name);
-    fclose(tmp);
-    fclose(c_file);
+    free_memory(mem, c_name);
+    close_fp(mem, tmp);
+    close_fp(mem, c_file);
 
     remove(filename);
 
@@ -199,47 +194,44 @@ int remove_empty_lines(const char *orig, const char *filename)
 int main(int argc, char const *argv[])
 {
 	if (argc == 1) {
-		printf("Please enter at least one file name clean.c\n");
+		printf("Please enter at least one file name\n");
 		return -1;
 	}
-    //signal(SIGINT, signal_handler);
+    /*allocating memory for the memory tracker itself*/
+    mem = calloc(sizeof(M_tracker), 1);
 
+    /*Setting up signal handling*/
     struct sigaction sa;
     sigemptyset(&sa.sa_mask);
     sa.sa_handler = &signal_handler;
     sa.sa_flags=0;
     sigaction(SIGINT, &sa, NULL);
-    sigaction(SIGTERM, &sa, NULL); 
-    sleep(10);   
+    sigaction(SIGTERM, &sa, NULL);  
 
-
-    char log_buf[1024] = { 0 };
-    char *write_log_buf;
     fd_log = open("prog.log", O_RDWR | O_APPEND | O_CREAT | O_NONBLOCK, S_IRWXU);
 
-	sprintf(log_buf, "Removing comments and empty lines from file %s \n", argv[1]);
-    printf("%s\n", log_buf);
-    write_log_buf = calloc(strlen(log_buf) + 1, 1);
-    strcpy(write_log_buf, log_buf);
-    write_log(write_log_buf, fd_log);
+	sprintf(log_buf, "\nRemoving comments and empty lines from file %s \n", argv[1]);
+    printf("%s", log_buf);
+    prepare_log();
 
 	char *tmp = calloc(strlen(argv[1]) + 5, 1);
+    mem = set_memory(mem, tmp);
     strcpy(tmp, argv[1]);
     strcat(tmp, ".tmp");
 
 	if (remove_comments(argv[1], tmp) == -1) {
-		free(tmp);
+		free_memory(mem, tmp);
 		return -1;
 	}
 
 	if (remove_empty_lines(argv[1], tmp) == -1) {
-		free(tmp);
+		free_memory(mem, tmp);
 		return -1;
 	}
 
-	free(tmp);
+	free_memory(mem, tmp);
     close(fd_log);
-    sleep(20);
+    release_memory(mem);
 
 	return 0;
 }
